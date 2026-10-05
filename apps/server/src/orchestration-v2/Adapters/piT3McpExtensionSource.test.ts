@@ -57,3 +57,88 @@ describe("Pi upstream output-budget workaround", () => {
     );
   });
 });
+
+type RegisteredTool = {
+  readonly name: string;
+  readonly execute: (
+    toolCallId: string,
+    params: unknown,
+    signal?: AbortSignal,
+  ) => Promise<{ readonly content: ReadonlyArray<unknown>; readonly isError?: boolean }>;
+};
+
+// Loads the extension against an MCP endpoint that answers tools/call with `callResult`.
+async function loadMcpTool(callResult: unknown): Promise<RegisteredTool> {
+  const tools: RegisteredTool[] = [];
+  const source = NodeModule.stripTypeScriptTypes(
+    PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
+      "export default async function",
+      "async function",
+    ),
+  );
+  const fetch = async (_url: string, init: { body: string }) => {
+    const { id, method } = JSON.parse(init.body) as { id?: number; method: string };
+    const result =
+      method === "tools/list"
+        ? { tools: [{ name: "preview_snapshot", inputSchema: { type: "object" } }] }
+        : method === "tools/call"
+          ? callResult
+          : {};
+    return new Response(id === undefined ? "" : JSON.stringify({ jsonrpc: "2.0", id, result }), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+  await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
+    process: { env: { T3_MCP_URL: "http://t3.test/mcp", T3_MCP_BEARER_TOKEN: "token" } },
+    fetch,
+    AbortSignal,
+    Type: { Unsafe: (schema: unknown) => schema },
+    pi: {
+      on: () => undefined,
+      registerTool: (tool: RegisteredTool) => tools.push(tool),
+    },
+  });
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    ["mcp__t3-code__preview_snapshot"],
+  );
+  return tools[0]!;
+}
+
+describe("Pi MCP tool results", () => {
+  const image = { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" };
+
+  it("passes screenshot image blocks to Pi after the text", async () => {
+    const tool = await loadMcpTool({
+      isError: false,
+      structuredContent: { url: "https://t3.codes" },
+      content: [{ type: "text", text: '{"url":"https://t3.codes"}' }, image],
+    });
+    const result = await tool.execute("call-1", {});
+    assert.equal(result.content.length, 2);
+    assert.include(result.content[0], { type: "text" });
+    assert.include((result.content[0] as { text: string }).text, '{"url":"https://t3.codes"}');
+    assert.deepEqual(result.content[1], image);
+    assert.isUndefined(result.isError);
+  });
+
+  it("keeps text-only results text-only", async () => {
+    const tool = await loadMcpTool({ content: [{ type: "text", text: "done" }] });
+    assert.deepEqual((await tool.execute("call-1", {})).content, [{ type: "text", text: "done" }]);
+  });
+
+  it("sends an image-only result as the image instead of its base64 JSON", async () => {
+    const tool = await loadMcpTool({ content: [image] });
+    assert.deepEqual((await tool.execute("call-1", {})).content, [image]);
+  });
+
+  it("drops malformed image blocks", async () => {
+    const tool = await loadMcpTool({
+      content: [
+        { type: "text", text: "shot" },
+        { type: "image", data: "iVBORw0KGgo=" },
+      ],
+    });
+    assert.deepEqual((await tool.execute("call-1", {})).content, [{ type: "text", text: "shot" }]);
+  });
+});
