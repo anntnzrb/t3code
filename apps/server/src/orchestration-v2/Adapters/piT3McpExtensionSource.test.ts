@@ -4,6 +4,14 @@ import { assert, describe, it } from "@effect/vitest";
 
 import { PI_T3_MCP_EXTENSION_SOURCE } from "./piT3McpExtensionSource.ts";
 
+// The shipped extension as a plain script. Tests supply Typebox through the VM context.
+const runnableSource = NodeModule.stripTypeScriptTypes(
+  PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
+    "export default async function",
+    "async function",
+  ),
+);
+
 type RequestHook = (
   event: { payload: unknown },
   ctx: { model: { provider: string } },
@@ -12,13 +20,7 @@ type RequestHook = (
 async function loadRequestHook(): Promise<RequestHook> {
   const handlers = new Map<string, RequestHook>();
   // Execute the shipped extension with MCP disabled; this path needs no Typebox.
-  const source = NodeModule.stripTypeScriptTypes(
-    PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
-      "export default async function",
-      "async function",
-    ),
-  );
-  await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
+  await NodeVM.runInNewContext(`${runnableSource}\nt3McpExtension(pi)`, {
     process: { env: {} },
     pi: { on: (name: string, handler: RequestHook) => handlers.set(name, handler) },
   });
@@ -70,12 +72,6 @@ type RegisteredTool = {
 // Loads the extension against an MCP endpoint that answers tools/call with `callResult`.
 async function loadMcpTool(callResult: unknown): Promise<RegisteredTool> {
   const tools: RegisteredTool[] = [];
-  const source = NodeModule.stripTypeScriptTypes(
-    PI_T3_MCP_EXTENSION_SOURCE.replace('import { Type } from "typebox";', "").replace(
-      "export default async function",
-      "async function",
-    ),
-  );
   const fetch = async (_url: string, init: { body: string }) => {
     const { id, method } = JSON.parse(init.body) as { id?: number; method: string };
     const result =
@@ -88,7 +84,7 @@ async function loadMcpTool(callResult: unknown): Promise<RegisteredTool> {
       headers: { "content-type": "application/json" },
     });
   };
-  await NodeVM.runInNewContext(`${source}\nt3McpExtension(pi)`, {
+  await NodeVM.runInNewContext(`${runnableSource}\nt3McpExtension(pi)`, {
     process: { env: { T3_MCP_URL: "http://t3.test/mcp", T3_MCP_BEARER_TOKEN: "token" } },
     fetch,
     AbortSignal,
